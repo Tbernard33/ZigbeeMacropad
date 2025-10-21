@@ -145,20 +145,20 @@ void startPairing() {
 }
 
 void updatePairingLED() {
-  if (pairingActive && !Zigbee.connected()) {
-    static unsigned long lastBlink = 0;
+  static unsigned long lastBlink = 0;
+  static bool on = false;
+
+  if (!Zigbee.connected()) {
     unsigned long now = millis();
     if (now - lastBlink > 300) {
       lastBlink = now;
-      static bool on = false;
       on = !on;
       if (on) setNeoPixelColor(COLOR_RED, ledBrightness);
       else setNeoPixelColor(COLOR_OFF);
     }
-  } else if (pairingActive && Zigbee.connected()) {
-    pairingActive = false;
+  } else if (on) {
+    on = false;
     setNeoPixelColor(COLOR_OFF);
-    Serial.println("[ZB] Connected. Stopping pairing LED.");
   }
 }
 
