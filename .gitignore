@@ -50,3 +50,50 @@ modules.order
 Module.symvers
 Mkfile.old
 dkms.conf
+
+.DS_Store
+.directory
+# Build directories
+zigbee_macropad_esp_idf/build/
+**/build/
+
+# ESP-IDF dependencies
+zigbee_macropad_esp_idf/components/.idf/
+**/components/.idf/
+managed_components
+
+# Project configuration
+sdkconfig
+sdkconfig.old
+
+# CMake files
+CMakeCache.txt
+CMakeFiles/
+Makefile
+
+# Python environment files
+*.pyc
+*.pyo
+*.pyd
+__pycache__
+
+# ESP32 toolchain files
+.espressif/
+
+# IDE specific files (e.g., Visual Studio Code, Eclipse)
+.idea/
+*.user
+*.workspace
+*.suo
+*.sln
+
+# ESP32 flash files
+*.bin
+*.elf
+*.map
+
+# Generated documentation
+zigbee_macropad_esp_idf/docs/
+
+# ESP-IDF logs
+*.log
