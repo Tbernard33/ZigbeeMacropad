@@ -53,9 +53,12 @@ static void zb_blink_step(void)
     /* Toggle LED red */
     g_blink_on = !g_blink_on;
     if (g_blink_on) {
-        light_driver_set_color_xy(0xFFFF, 0x0000);  // red
+        light_driver_set_color_xy(0xA3D6, 0x547B);  // red
+        //green : Color X: 0x4ccd  Color Y: 0x9999
+        //blue : Color X: 0x2666  Color Y: 0x0f5c
+        //yellow : Color X: 0x6b58  Color Y: 0x8157
         light_driver_set_power(true);
-        light_driver_set_level(100);
+        light_driver_set_level(25);
     } else {
         light_driver_set_level(0);
     }
@@ -229,6 +232,7 @@ static esp_err_t zb_attribute_handler(const esp_zb_zcl_set_attr_value_message_t 
                     ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
                     ESP_ZB_ZCL_ATTR_COLOR_CONTROL_CURRENT_X_ID)->data_p;
             }
+            //ESP_LOGI(TAG, "Color X: 0x%04x  Color Y: 0x%04x", light_color_x, light_color_y);
             light_driver_set_color_xy(light_color_x, light_color_y);
             break;
         case ESP_ZB_ZCL_CLUSTER_ID_LEVEL_CONTROL:
