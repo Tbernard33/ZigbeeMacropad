@@ -38,18 +38,20 @@ static const gpio_num_t BTN_PINS[BTN_COUNT] = {
 #define BOOT_BUTTON_GPIO     GPIO_NUM_9
 
 /* --- Timing (ms) for local keypad -------------------------------------- */
+#define BTN_POLL_INTERVAL_MS   10
 #define DEBOUNCE_MS        30
 #define DOUBLE_CLICK_MS   400
 #define LONG_PRESS_MS    1000
 
 /* --- Button state machine ----------------------------------------------- */
 typedef struct {
-    bool     last_raw;
-    bool     stable;
+    bool raw;
+    bool stable;
+    bool prev_stable;
     uint64_t last_change_us;
     uint64_t press_start_us;
     uint64_t last_release_us;
-    bool     long_fired;
+    bool long_fired;
 } btn_state_t;
 
 typedef struct {
@@ -58,7 +60,6 @@ typedef struct {
     bool level;        // 0 = pressed, 1 = released
 } btn_evt_t;
 
-static QueueHandle_t s_btn_evt_q = NULL;
 static QueueHandle_t s_boot_evt_q = NULL;
 
 static btn_state_t g_btn[BTN_COUNT];
@@ -74,7 +75,7 @@ static bool g_zb_ready = false;
 static inline uint64_t now_us(void) { return esp_timer_get_time(); }
 static inline uint32_t us_to_ms(uint64_t us) { return (uint32_t)(us / 1000ULL); }
 
-typedef enum { ACT_SINGLE, ACT_DOUBLE, ACT_LONG } action_t;
+typedef enum { ACT_NONE, ACT_SINGLE, ACT_DOUBLE, ACT_LONG } action_t;
 
 /* --- Forward declarations  ------------------------------------------------------ */
 static const char* action_str(action_t a);
@@ -152,19 +153,6 @@ static void IRAM_ATTR boot_button_isr(void *arg) {
     xQueueSendFromISR(s_boot_evt_q, &dummy, NULL);
 }
 
-static void IRAM_ATTR btn_isr(void *arg)
-{
-    uint8_t idx = (uint32_t)arg;  // index passed in handler_add
-    btn_evt_t evt = {
-        .idx = idx,
-        .timestamp_us = esp_timer_get_time(),
-        .level = gpio_get_level(BTN_PINS[idx]),
-    };
-    BaseType_t hpw = pdFALSE;
-    if (s_btn_evt_q) xQueueSendFromISR(s_btn_evt_q, &evt, &hpw);
-    if (hpw) portYIELD_FROM_ISR();
-}
-
 static void boot_button_task(void *arg) {
     uint32_t dummy;
     while (1) {
@@ -191,7 +179,7 @@ static void flash_action(action_t a, uint8_t brightness) {
     }
     light_driver_set_power(true);
     light_driver_set_level(brightness);   // adjust if you want dimmer pairing
-    vTaskDelay(pdMS_TO_TICKS(100));
+    vTaskDelay(pdMS_TO_TICKS(150));
     light_driver_set_power(false);
 }
 
@@ -202,57 +190,59 @@ static void on_button_action(uint8_t index, action_t act) {
 
 static void button_task(void *arg)
 {
-    btn_evt_t evt;
+    const uint64_t poll_interval_us = BTN_POLL_INTERVAL_MS * 1000ULL;
+    const uint64_t debounce_us      = DEBOUNCE_MS * 1000ULL;
+    const uint64_t double_click_us  = DOUBLE_CLICK_MS * 1000ULL;
+    const uint64_t long_press_us    = LONG_PRESS_MS * 1000ULL;
+
     while (true) {
-        if (xQueueReceive(s_btn_evt_q, &evt, portMAX_DELAY) == pdTRUE) {
-            uint64_t t_us = evt.timestamp_us;
-            uint8_t i = evt.idx;
-            bool raw_pressed = (evt.level == 0);
+        uint64_t now = esp_timer_get_time();
 
-            // --- Debounce ---
-            if (raw_pressed != g_btn[i].stable &&
-                us_to_ms(t_us - g_btn[i].last_change_us) >= DEBOUNCE_MS)
-            {
-                g_btn[i].stable = raw_pressed;
-                g_btn[i].last_change_us = t_us;
+        for (int i = 0; i < BTN_COUNT; ++i) {
+            bool raw = (gpio_get_level(BTN_PINS[i]) == 0);  // active low
+            btn_state_t *b = &g_btn[i];
 
-                if (g_btn[i].stable) {
-                    g_btn[i].press_start_us = t_us;
-                    g_btn[i].long_fired = false;
+            // Debounce transition
+            if (raw != b->stable && now - b->last_change_us > debounce_us) {
+                b->prev_stable = b->stable;
+                b->stable = raw;
+                b->last_change_us = now;
+
+                if (b->stable) {
+                    // pressed
+                    b->press_start_us = now;
+                    b->long_fired = false;
                 } else {
-                    // Released
-                    if (!g_btn[i].long_fired) {
-                        if (g_btn[i].last_release_us &&
-                            us_to_ms(t_us - g_btn[i].last_release_us) <= DOUBLE_CLICK_MS)
-                        {
+                    // released
+                    if (!b->long_fired) {
+                        if (b->last_release_us &&
+                            (now - b->last_release_us < double_click_us)) {
                             on_button_action(i, ACT_DOUBLE);
-                            g_btn[i].last_release_us = 0;
+                            b->last_release_us = 0;
                         } else {
-                            g_btn[i].last_release_us = t_us;
+                            b->last_release_us = now;
                         }
-                    } else {
-                        g_btn[i].last_release_us = 0;
                     }
                 }
             }
 
-            // Long press check
-            if (g_btn[i].stable && !g_btn[i].long_fired &&
-                us_to_ms(t_us - g_btn[i].press_start_us) >= LONG_PRESS_MS)
-            {
-                g_btn[i].long_fired = true;
+            // long press detection
+            if (b->stable && !b->long_fired &&
+                now - b->press_start_us > long_press_us) {
+                b->long_fired = true;
                 on_button_action(i, ACT_LONG);
-                g_btn[i].last_release_us = 0;
+                b->last_release_us = 0;
             }
 
-            // Single click timeout
-            if (g_btn[i].last_release_us &&
-                us_to_ms(t_us - g_btn[i].last_release_us) > DOUBLE_CLICK_MS)
-            {
+            // single click confirmation (timeout expired)
+            if (!b->stable && b->last_release_us &&
+                now - b->last_release_us > double_click_us) {
                 on_button_action(i, ACT_SINGLE);
-                g_btn[i].last_release_us = 0;
+                b->last_release_us = 0;
             }
         }
+
+        vTaskDelay(pdMS_TO_TICKS(BTN_POLL_INTERVAL_MS));
     }
 }
 
@@ -455,27 +445,12 @@ void app_main(void)
     };
     ESP_ERROR_CHECK(gpio_config(&btnio));
 
-    // --- Create queues ---
-    s_btn_evt_q = xQueueCreate(32, sizeof(btn_evt_t));
+    // --- Create queue ---
     s_boot_evt_q = xQueueCreate(4, sizeof(uint32_t));
 
     // --- Install ISR service ONCE ---
     ESP_ERROR_CHECK(gpio_install_isr_service(0));
-
-    // --- Register ISRs for all keys ---
-    for (int i = 0; i < BTN_COUNT; ++i) {
-        gpio_isr_handler_add(BTN_PINS[i], btn_isr, (void *)(uintptr_t)i);
-    }
     gpio_isr_handler_add(BOOT_BUTTON_GPIO, boot_button_isr, NULL);
-
-    // --- Initialize button states ---
-    memset(g_btn, 0, sizeof(g_btn));
-    uint64_t t0 = now_us();
-    for (int i = 0; i < BTN_COUNT; ++i) {
-        g_btn[i].last_raw = (gpio_get_level(BTN_PINS[i]) == 0);
-        g_btn[i].stable = g_btn[i].last_raw;
-        g_btn[i].last_change_us = t0;
-    }
 
     // --- Launch tasks ---
     xTaskCreate(button_task, "button_task", 4096, NULL, 1, NULL);
