@@ -183,8 +183,16 @@ static const char* action_str(action_t a) {
 }
 
 static void flash_action(action_t a, uint8_t brightness) {
-    (void)a; (void)brightness;
+    switch(a){
+        case ACT_SINGLE: light_driver_set_color_xy(0x4ccd, 0x9999);break;  // green
+        case ACT_DOUBLE: light_driver_set_color_xy(0x2666, 0x0f5c);break;  // blue
+        case ACT_LONG: light_driver_set_color_xy(0x6b58, 0x8157);break;  // yellow
+        default: break;
+    }
+    light_driver_set_power(true);
+    light_driver_set_level(brightness);   // adjust if you want dimmer pairing
     vTaskDelay(pdMS_TO_TICKS(100));
+    light_driver_set_power(false);
 }
 
 static void on_button_action(uint8_t index, action_t act) {
@@ -194,7 +202,6 @@ static void on_button_action(uint8_t index, action_t act) {
 
 static void button_task(void *arg)
 {
-    ESP_LOGI(TAG, "Button");
     btn_evt_t evt;
     while (true) {
         if (xQueueReceive(s_btn_evt_q, &evt, portMAX_DELAY) == pdTRUE) {
