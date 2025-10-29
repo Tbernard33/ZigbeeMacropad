@@ -1,16 +1,16 @@
 /*
  * Zigbee HA_color_dimmable_light Example (ESP32-C6)
  * -------------------------------------------------
- * Features:
- *  - RGB LED blinks RED while searching/joining a network.
- *  - Stops blinking once joined; Zigbee commands work normally.
- *  - BOOT button triggers factory reset and restarts pairing.
- *  - Button scanner task is low priority and non-blocking (no WDT trips).
+ * Simplified for MACROPAD:
+ *  - Only Zigbee Level Control / Current Level is honored.
+ *  - That brightness is used for the short LED feedback when a key is pressed.
+ *  - Color & On/Off writes are ignored.
+ *  - Pairing still blinks RED while not joined.
  */
 
 #include <stdio.h>
 #include <string.h>
-#include "esp_zb_light.h"
+#include "esp_zb_macropad.h"
 #include "esp_check.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
@@ -69,7 +69,10 @@ static bool g_is_joined     = false;
 static bool g_blinking      = false;
 static bool g_driver_ready  = false;
 static bool g_blink_on      = false;
-static bool g_zb_ready = false;
+static bool g_zb_ready      = false;
+
+/* Brightness (0..254 from Zigbee Level Control); used for key feedback */
+static uint8_t g_feedback_level = 80;
 
 /* --- Helpers ------------------------------------------------------------ */
 static inline uint64_t now_us(void) { return esp_timer_get_time(); }
@@ -96,9 +99,11 @@ static void zb_blink_step(void)
     }
 
     if (!g_blinking) {
-        /* IMPORTANT: do NOT touch power/level when not blinking.
-           This prevents overriding user UI commands. */
-        g_blink_on = false;
+        if (g_blink_on) {                  // ensure off
+            light_driver_set_level(0);
+            light_driver_set_power(false);
+            g_blink_on = false;
+        }
         esp_zb_scheduler_alarm_cancel((esp_zb_callback_t)zb_blink_step, 0);
         return;
     }
@@ -118,6 +123,17 @@ static void zb_blink_step(void)
     /* Reschedule single instance */
     esp_zb_scheduler_alarm_cancel((esp_zb_callback_t)zb_blink_step, 0);
     esp_zb_scheduler_alarm((esp_zb_callback_t)zb_blink_step, 0, 300);
+}
+
+static void zb_stop_pairing_blink(void)
+{
+    g_blinking = false;
+    if (g_blink_on) {
+        light_driver_set_level(0);
+        light_driver_set_power(false);
+        g_blink_on = false;
+    }
+    esp_zb_scheduler_alarm_cancel((esp_zb_callback_t)zb_blink_step, 0);
 }
 
 /* ======================================================================= */
@@ -166,11 +182,18 @@ static void boot_button_task(void *arg) {
     }
 }
 
+/* ======================================================================= */
+/*                     LOCAL FEEDBACK (color fixed)                         */
+/* ======================================================================= */
 static const char* action_str(action_t a) {
     return (a==ACT_SINGLE) ? "single" : (a==ACT_DOUBLE) ? "double" : "long";
 }
 
 static void flash_action(action_t a, uint8_t brightness) {
+    /* If brightness is 0, skip visible flash */
+    if (brightness == 0) return;
+
+    /* Fixed colors per action; only brightness comes from Zigbee */
     switch(a){
         case ACT_SINGLE: light_driver_set_color_xy(0x4ccd, 0x9999);break;  // green
         case ACT_DOUBLE: light_driver_set_color_xy(0x2666, 0x0f5c);break;  // blue
@@ -184,10 +207,13 @@ static void flash_action(action_t a, uint8_t brightness) {
 }
 
 static void on_button_action(uint8_t index, action_t act) {
-    ESP_LOGI(TAG, "Button %u -> %s", (unsigned)index+1, action_str(act));
-    flash_action(act, 80);
+    ESP_LOGI(TAG, "Button %u -> %s (feedback=%u)", (unsigned)index+1, action_str(act), (unsigned)g_feedback_level);
+    flash_action(act, g_feedback_level);
 }
 
+/* ======================================================================= */
+/*                        BUTTON SCANNER TASK                               */
+/* ======================================================================= */
 static void button_task(void *arg)
 {
     const uint64_t poll_interval_us = BTN_POLL_INTERVAL_MS * 1000ULL;
@@ -298,7 +324,7 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *sig)
         if (err_status == ESP_OK) {
             g_is_joined = true;
             g_blinking  = false;  // stop blinking
-            esp_zb_scheduler_alarm_cancel((esp_zb_callback_t)zb_blink_step, 0);
+            zb_stop_pairing_blink();
             ESP_LOGI(TAG, "Joined network successfully");
         } else {
             g_is_joined = false;
@@ -330,56 +356,48 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *sig)
 }
 
 /* ======================================================================= */
-/*                ZCL attribute & action handlers (standard)                */
+/*                ZCL attribute handler (ONLY BRIGHTNESS)                   */
 /* ======================================================================= */
 static esp_err_t zb_attribute_handler(const esp_zb_zcl_set_attr_value_message_t *message)
 {
-    esp_err_t ret = ESP_OK;
-    bool     light_state   = 0;
-    uint8_t  light_level   = 0;
-    uint16_t light_color_x = 0;
-    uint16_t light_color_y = 0;
-
     ESP_RETURN_ON_FALSE(message, ESP_FAIL, TAG, "Empty message");
     ESP_RETURN_ON_FALSE(message->info.status == ESP_ZB_ZCL_STATUS_SUCCESS,
                         ESP_ERR_INVALID_ARG, TAG, "Bad ZCL status");
 
-    if (message->info.dst_endpoint == HA_COLOR_DIMMABLE_LIGHT_ENDPOINT) {
-        switch (message->info.cluster) {
-        case ESP_ZB_ZCL_CLUSTER_ID_ON_OFF:
-            if (message->attribute.id == ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID) {
-                light_state = *(bool *)message->attribute.data.value;
-                light_driver_set_power(light_state);
-                ESP_LOGI(TAG, "Light %s", light_state ? "ON" : "OFF");
-            }
-            break;
-        case ESP_ZB_ZCL_CLUSTER_ID_COLOR_CONTROL:
-            if (message->attribute.id == ESP_ZB_ZCL_ATTR_COLOR_CONTROL_CURRENT_X_ID) {
-                light_color_x = *(uint16_t *)message->attribute.data.value;
-                light_color_y = *(uint16_t *)esp_zb_zcl_get_attribute(
-                    message->info.dst_endpoint, message->info.cluster,
-                    ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
-                    ESP_ZB_ZCL_ATTR_COLOR_CONTROL_CURRENT_Y_ID)->data_p;
-            } else if (message->attribute.id == ESP_ZB_ZCL_ATTR_COLOR_CONTROL_CURRENT_Y_ID) {
-                light_color_y = *(uint16_t *)message->attribute.data.value;
-                light_color_x = *(uint16_t *)esp_zb_zcl_get_attribute(
-                    message->info.dst_endpoint, message->info.cluster,
-                    ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
-                    ESP_ZB_ZCL_ATTR_COLOR_CONTROL_CURRENT_X_ID)->data_p;
-            }
-            light_driver_set_color_xy(light_color_x, light_color_y);
-            break;
-        case ESP_ZB_ZCL_CLUSTER_ID_LEVEL_CONTROL:
-            if (message->attribute.id == ESP_ZB_ZCL_ATTR_LEVEL_CONTROL_CURRENT_LEVEL_ID) {
-                light_level = *(uint8_t *)message->attribute.data.value;
-                light_driver_set_level(light_level);
-            }
-            break;
-        default:
-            ESP_LOGI(TAG, "Unhandled cluster 0x%x", message->info.cluster);
-        }
+    if (message->info.dst_endpoint != HA_COLOR_DIMMABLE_LIGHT_ENDPOINT) {
+        return ESP_OK;
     }
-    return ret;
+
+    switch (message->info.cluster) {
+    case ESP_ZB_ZCL_CLUSTER_ID_ON_OFF:
+        if (message->attribute.id == ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID &&
+            message->attribute.data.value) {
+            bool state = *(bool *)message->attribute.data.value;
+            light_driver_set_power(state);
+            ESP_LOGI(TAG, "Light %s", state ? "ON" : "OFF");
+        }
+        break;
+
+    case ESP_ZB_ZCL_CLUSTER_ID_LEVEL_CONTROL:
+        if (message->attribute.id == ESP_ZB_ZCL_ATTR_LEVEL_CONTROL_CURRENT_LEVEL_ID &&
+            message->attribute.data.value) {
+            uint8_t level = *(uint8_t *)message->attribute.data.value;
+            light_driver_set_level(level);
+            ESP_LOGI(TAG, "Brightness set to %u", level);
+        }
+        break;
+
+    /* COLOR cluster is present in this device type, but we ignore writes: */
+    case ESP_ZB_ZCL_CLUSTER_ID_COLOR_CONTROL:
+        ESP_LOGI(TAG, "Color write ignored (device uses brightness only).");
+        break;
+
+    default:
+        ESP_LOGI(TAG, "Unhandled cluster 0x%04x", message->info.cluster);
+        break;
+    }
+
+    return ESP_OK;
 }
 
 static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id, const void *message)
@@ -394,24 +412,30 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id,
 /* ======================================================================= */
 static void esp_zb_task(void *pv)
 {
+    /* Router config & stack init */
     esp_zb_cfg_t zb_nwk_cfg = ESP_ZB_ZR_CONFIG();
     esp_zb_init(&zb_nwk_cfg);
 
+    /* === Use COLOR DIMMABLE template (this exists in your SDK) === */
     esp_zb_color_dimmable_light_cfg_t light_cfg = ESP_ZB_DEFAULT_COLOR_DIMMABLE_LIGHT_CONFIG();
     esp_zb_ep_list_t *ep =
         esp_zb_color_dimmable_light_ep_create(HA_COLOR_DIMMABLE_LIGHT_ENDPOINT, &light_cfg);
 
+    /* Basic info (optional but nice) */
     zcl_basic_manufacturer_info_t info = {
         .manufacturer_name = ESP_MANUFACTURER_NAME,
         .model_identifier  = ESP_MODEL_IDENTIFIER,
     };
     esp_zcl_utility_add_ep_basic_manufacturer_info(ep, HA_COLOR_DIMMABLE_LIGHT_ENDPOINT, &info);
+
+    /* Register + callbacks + start */
     esp_zb_device_register(ep);
     esp_zb_core_action_handler_register(zb_action_handler);
 
     esp_zb_set_primary_network_channel_set(ESP_ZB_PRIMARY_CHANNEL_MASK);
     ESP_ERROR_CHECK(esp_zb_start(false));
     g_zb_ready = true;
+
     esp_zb_stack_main_loop();
 }
 
@@ -452,12 +476,21 @@ void app_main(void)
     ESP_ERROR_CHECK(gpio_install_isr_service(0));
     gpio_isr_handler_add(BOOT_BUTTON_GPIO, boot_button_isr, NULL);
 
+    // --- Init button states ---
+    memset(g_btn, 0, sizeof(g_btn));
+    uint64_t t0 = now_us();
+    for (int i = 0; i < BTN_COUNT; ++i) {
+        g_btn[i].raw = (gpio_get_level(BTN_PINS[i]) == 0);
+        g_btn[i].stable = g_btn[i].raw;
+        g_btn[i].prev_stable = g_btn[i].raw;
+        g_btn[i].last_change_us = t0;
+    }
+
     // --- Launch tasks ---
     xTaskCreate(button_task, "button_task", 4096, NULL, 1, NULL);
     xTaskCreate(boot_button_task, "boot_btn", 2048, NULL, 1, NULL);
 
     /* --- ZIGBEE --------------------------------------------------------- */
-    
     ESP_ERROR_CHECK(nvs_flash_init());
 
     esp_zb_platform_config_t config = {

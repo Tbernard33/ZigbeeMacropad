@@ -16,6 +16,7 @@
   "files.associations": {
     "stdio.h": "c",
     "string.h": "c",
-    "task.h": "c"
+    "task.h": "c",
+    "light_driver.h": "c"
   }
 }
