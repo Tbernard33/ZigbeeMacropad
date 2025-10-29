@@ -12,9 +12,10 @@ It gives 3 sorts of inputs, single click, double clicks and long click to add in
 |------------|-------------|
 | **MCU** | nanoESP32-C6-N8 |
 | **Switches** | 16 x Cherry MX Red (linear) |
-| **Battery** | 3 x EBL 1.5 V lithium-ion rechargeable AA cell |
+| **Battery** | 2 x EBL 1.5 V lithium-ion rechargeable AA cell |
 | **Buttons** | 6 mm tactile push button (BOOT / Reset) |
 | **Power switch** | 13 mm by 8.5 mm on/off slide switch |
+| **BOOST Converter** | MT3608 DC-DC Boost converter (3.1v to 3.3v) |
 | **Magnets** | 4 x 10 mm × 2 mm neodymium discs |
 | **Threaded inserts** | 4 x M2.5 heat-set brass inserts |
 | **Screws** | 4 x M2.5 × 5 mm machine screws |
