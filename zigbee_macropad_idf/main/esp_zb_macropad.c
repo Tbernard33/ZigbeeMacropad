@@ -42,6 +42,11 @@ static const gpio_num_t BTN_PINS[BTN_COUNT] = {
 #define DEBOUNCE_MS        30
 #define DOUBLE_CLICK_MS   400
 #define LONG_PRESS_MS    1000
+#define CUSTOM_CLUSTER_ID        0xFC00    // arbitrary manufacturer-specific range
+#define ATTR_BRIGHTNESS_ID       0x0001
+#define CONFIG_ENDPOINT     10
+
+static uint32_t zb_brightness = 100; // default brightness (0–255)
 
 /* --- Button state machine ----------------------------------------------- */
 typedef struct {
@@ -361,40 +366,18 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *sig)
 static esp_err_t zb_attribute_handler(const esp_zb_zcl_set_attr_value_message_t *message)
 {
     ESP_RETURN_ON_FALSE(message, ESP_FAIL, TAG, "Empty message");
-    ESP_RETURN_ON_FALSE(message->info.status == ESP_ZB_ZCL_STATUS_SUCCESS,
-                        ESP_ERR_INVALID_ARG, TAG, "Bad ZCL status");
 
-    if (message->info.dst_endpoint != HA_COLOR_DIMMABLE_LIGHT_ENDPOINT) {
+    if (message->info.cluster == CUSTOM_CLUSTER_ID &&
+        message->attribute.id == ATTR_BRIGHTNESS_ID &&
+        message->attribute.data.type == ESP_ZB_ZCL_ATTR_TYPE_U8 &&
+        message->attribute.data.value)
+    {
+        zb_brightness = *(uint8_t*)message->attribute.data.value;
+        ESP_LOGI(TAG, "New brightness = %u", (unsigned int)zb_brightness);
+
+        light_driver_set_power(zb_brightness > 0);
+        light_driver_set_level(zb_brightness);
         return ESP_OK;
-    }
-
-    switch (message->info.cluster) {
-    case ESP_ZB_ZCL_CLUSTER_ID_ON_OFF:
-        if (message->attribute.id == ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID &&
-            message->attribute.data.value) {
-            bool state = *(bool *)message->attribute.data.value;
-            light_driver_set_power(state);
-            ESP_LOGI(TAG, "Light %s", state ? "ON" : "OFF");
-        }
-        break;
-
-    case ESP_ZB_ZCL_CLUSTER_ID_LEVEL_CONTROL:
-        if (message->attribute.id == ESP_ZB_ZCL_ATTR_LEVEL_CONTROL_CURRENT_LEVEL_ID &&
-            message->attribute.data.value) {
-            uint8_t level = *(uint8_t *)message->attribute.data.value;
-            light_driver_set_level(level);
-            ESP_LOGI(TAG, "Brightness set to %u", level);
-        }
-        break;
-
-    /* COLOR cluster is present in this device type, but we ignore writes: */
-    case ESP_ZB_ZCL_CLUSTER_ID_COLOR_CONTROL:
-        ESP_LOGI(TAG, "Color write ignored (device uses brightness only).");
-        break;
-
-    default:
-        ESP_LOGI(TAG, "Unhandled cluster 0x%04x", message->info.cluster);
-        break;
     }
 
     return ESP_OK;
@@ -412,30 +395,55 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id,
 /* ======================================================================= */
 static void esp_zb_task(void *pv)
 {
-    /* Router config & stack init */
+    // --- Zigbee stack init (router) ---
     esp_zb_cfg_t zb_nwk_cfg = ESP_ZB_ZR_CONFIG();
     esp_zb_init(&zb_nwk_cfg);
 
-    /* === Use COLOR DIMMABLE template (this exists in your SDK) === */
-    esp_zb_color_dimmable_light_cfg_t light_cfg = ESP_ZB_DEFAULT_COLOR_DIMMABLE_LIGHT_CONFIG();
-    esp_zb_ep_list_t *ep =
-        esp_zb_color_dimmable_light_ep_create(HA_COLOR_DIMMABLE_LIGHT_ENDPOINT, &light_cfg);
+    // --- Attribute list (for our custom cluster) ---
+    esp_zb_attribute_list_t *attr_list = esp_zb_zcl_attr_list_create(CUSTOM_CLUSTER_ID);
+    ESP_ERROR_CHECK(attr_list ? ESP_OK : ESP_FAIL);
 
-    /* Basic info (optional but nice) */
-    zcl_basic_manufacturer_info_t info = {
-        .manufacturer_name = ESP_MANUFACTURER_NAME,
-        .model_identifier  = ESP_MODEL_IDENTIFIER,
+    ESP_ERROR_CHECK(
+        esp_zb_cluster_add_attr(attr_list,
+                                CUSTOM_CLUSTER_ID,
+                                ATTR_BRIGHTNESS_ID,
+                                ESP_ZB_ZCL_ATTR_TYPE_U8,
+                                ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE,
+                                &zb_brightness)
+    );
+
+    // --- Cluster list ---
+    esp_zb_cluster_list_t *cluster_list = esp_zb_zcl_cluster_list_create();
+    ESP_ERROR_CHECK(cluster_list ? ESP_OK : ESP_FAIL);
+
+    ESP_ERROR_CHECK(
+        esp_zb_cluster_list_add_custom_cluster(cluster_list,
+                                               attr_list,
+                                               ESP_ZB_ZCL_CLUSTER_SERVER_ROLE)
+    );
+
+    // --- Endpoint configuration ---
+    esp_zb_endpoint_config_t ep_cfg = {
+        .endpoint = CONFIG_ENDPOINT,
+        .app_profile_id = ESP_ZB_AF_HA_PROFILE_ID,
+        .app_device_id = 0x1234,
+        .app_device_version = 1,
     };
-    esp_zcl_utility_add_ep_basic_manufacturer_info(ep, HA_COLOR_DIMMABLE_LIGHT_ENDPOINT, &info);
 
-    /* Register + callbacks + start */
-    esp_zb_device_register(ep);
+    // --- Endpoint list ---
+    esp_zb_ep_list_t *ep_list = esp_zb_ep_list_create();
+    ESP_ERROR_CHECK(ep_list ? ESP_OK : ESP_FAIL);
+
+    ESP_ERROR_CHECK(esp_zb_ep_list_add_ep(ep_list, cluster_list, ep_cfg));
+
+    // --- Register device + handlers ---
+    esp_zb_device_register(ep_list);
     esp_zb_core_action_handler_register(zb_action_handler);
 
     esp_zb_set_primary_network_channel_set(ESP_ZB_PRIMARY_CHANNEL_MASK);
     ESP_ERROR_CHECK(esp_zb_start(false));
-    g_zb_ready = true;
 
+    g_zb_ready = true;
     esp_zb_stack_main_loop();
 }
 
