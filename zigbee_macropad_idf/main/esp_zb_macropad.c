@@ -395,16 +395,57 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id,
 /* ======================================================================= */
 static void esp_zb_task(void *pv)
 {
-    // --- Zigbee stack init (router) ---
+    // --- Zigbee stack init (router mode) ---
     esp_zb_cfg_t zb_nwk_cfg = ESP_ZB_ZR_CONFIG();
     esp_zb_init(&zb_nwk_cfg);
 
-    // --- Attribute list (for our custom cluster) ---
-    esp_zb_attribute_list_t *attr_list = esp_zb_zcl_attr_list_create(CUSTOM_CLUSTER_ID);
-    ESP_ERROR_CHECK(attr_list ? ESP_OK : ESP_FAIL);
+    /*---------------------------------------------------------------
+    * BASIC CLUSTER (mandatory)
+    *-------------------------------------------------------------*/
+    esp_zb_basic_cluster_cfg_t basic_cfg = {
+        .zcl_version = ESP_ZB_ZCL_BASIC_ZCL_VERSION_DEFAULT_VALUE,
+        .power_source = ESP_ZB_ZCL_BASIC_POWER_SOURCE_DC_SOURCE,
+    };
+    esp_zb_attribute_list_t *basic_cluster = esp_zb_basic_cluster_create(&basic_cfg);
+
+    // Add manufacturer + model strings
+    static const char manufacturer_name[] = ESP_MANUFACTURER_NAME;
+    static const char model_identifier[]  = ESP_MODEL_IDENTIFIER;
 
     ESP_ERROR_CHECK(
-        esp_zb_cluster_add_attr(attr_list,
+        esp_zb_cluster_add_attr(basic_cluster,
+                                ESP_ZB_ZCL_CLUSTER_ID_BASIC,
+                                ESP_ZB_ZCL_ATTR_BASIC_MANUFACTURER_NAME_ID,
+                                ESP_ZB_ZCL_ATTR_TYPE_CHAR_STRING,
+                                ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY,
+                                (void *)manufacturer_name)
+    );
+
+    ESP_ERROR_CHECK(
+        esp_zb_cluster_add_attr(basic_cluster,
+                                ESP_ZB_ZCL_CLUSTER_ID_BASIC,
+                                ESP_ZB_ZCL_ATTR_BASIC_MODEL_IDENTIFIER_ID,
+                                ESP_ZB_ZCL_ATTR_TYPE_CHAR_STRING,
+                                ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY,
+                                (void *)model_identifier)
+    );
+
+    /*---------------------------------------------------------------
+     * IDENTIFY CLUSTER (mandatory)
+     *-------------------------------------------------------------*/
+    esp_zb_identify_cluster_cfg_t identify_cfg = {
+        .identify_time = 0,
+    };
+    esp_zb_attribute_list_t *identify_cluster = esp_zb_identify_cluster_create(&identify_cfg);
+
+    /*---------------------------------------------------------------
+     * CUSTOM CLUSTER (for brightness attribute)
+     *-------------------------------------------------------------*/
+    esp_zb_attribute_list_t *custom_cluster = esp_zb_zcl_attr_list_create(CUSTOM_CLUSTER_ID);
+    ESP_ERROR_CHECK(custom_cluster ? ESP_OK : ESP_FAIL);
+
+    ESP_ERROR_CHECK(
+        esp_zb_cluster_add_attr(custom_cluster,
                                 CUSTOM_CLUSTER_ID,
                                 ATTR_BRIGHTNESS_ID,
                                 ESP_ZB_ZCL_ATTR_TYPE_U8,
@@ -412,31 +453,45 @@ static void esp_zb_task(void *pv)
                                 &zb_brightness)
     );
 
-    // --- Cluster list ---
+    /*---------------------------------------------------------------
+     * CLUSTER LIST (add mandatory + custom)
+     *-------------------------------------------------------------*/
     esp_zb_cluster_list_t *cluster_list = esp_zb_zcl_cluster_list_create();
     ESP_ERROR_CHECK(cluster_list ? ESP_OK : ESP_FAIL);
 
     ESP_ERROR_CHECK(
+        esp_zb_cluster_list_add_basic_cluster(cluster_list,
+                                              basic_cluster,
+                                              ESP_ZB_ZCL_CLUSTER_SERVER_ROLE)
+    );
+    ESP_ERROR_CHECK(
+        esp_zb_cluster_list_add_identify_cluster(cluster_list,
+                                                 identify_cluster,
+                                                 ESP_ZB_ZCL_CLUSTER_SERVER_ROLE)
+    );
+    ESP_ERROR_CHECK(
         esp_zb_cluster_list_add_custom_cluster(cluster_list,
-                                               attr_list,
+                                               custom_cluster,
                                                ESP_ZB_ZCL_CLUSTER_SERVER_ROLE)
     );
 
-    // --- Endpoint configuration ---
+    /*---------------------------------------------------------------
+     * ENDPOINT + DEVICE CONFIGURATION
+     *-------------------------------------------------------------*/
     esp_zb_endpoint_config_t ep_cfg = {
-        .endpoint = CONFIG_ENDPOINT,
-        .app_profile_id = ESP_ZB_AF_HA_PROFILE_ID,
-        .app_device_id = 0x1234,
+        .endpoint = CONFIG_ENDPOINT,                // e.g., 10
+        .app_profile_id = ESP_ZB_AF_HA_PROFILE_ID,  // Home Automation profile
+        .app_device_id = 0x1234,                    // Custom device type
         .app_device_version = 1,
     };
 
-    // --- Endpoint list ---
     esp_zb_ep_list_t *ep_list = esp_zb_ep_list_create();
     ESP_ERROR_CHECK(ep_list ? ESP_OK : ESP_FAIL);
-
     ESP_ERROR_CHECK(esp_zb_ep_list_add_ep(ep_list, cluster_list, ep_cfg));
 
-    // --- Register device + handlers ---
+    /*---------------------------------------------------------------
+     * REGISTER DEVICE + HANDLERS
+     *-------------------------------------------------------------*/
     esp_zb_device_register(ep_list);
     esp_zb_core_action_handler_register(zb_action_handler);
 

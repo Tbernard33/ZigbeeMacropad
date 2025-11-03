@@ -28,7 +28,7 @@
 
 /* --- Manufacturer information --- */
 #define ESP_MANUFACTURER_NAME  "\x09""STARKYDIY"    /* Custom manufacturer name */
-#define ESP_MODEL_IDENTIFIER   "\x07""MACROPAD"     /* Model identifier */
+#define ESP_MODEL_IDENTIFIER   "\x08""MACROPAD"     /* Model identifier */
 
 /* --- Zigbee device configuration macros --- */
 #define ESP_ZB_ZR_CONFIG()                                      \
